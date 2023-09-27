@@ -30,7 +30,6 @@ include_directories ( SYSTEM
 )
 
 add_subdirectory ( src/messages )
-include_directories ( "${CMAKE_CURRENT_BINARY_DIR}/src/messages" )
 
 add_definitions ( -D PBRT_CONSTEXPR=constexpr )
 add_definitions ( -D PBRT_THREAD_LOCAL=thread_local )
@@ -48,11 +47,14 @@ file ( GLOB SOURCE
     src/worker/*
 )
 
-include_directories ( src )
 
 add_library( r2e2 STATIC
     ${SOURCE}
 )
+target_include_directories ( r2e2 PUBLIC src )
+target_include_directories ( r2e2 PUBLIC "${CMAKE_CURRENT_BINARY_DIR}/src/messages" )
+
+add_subdirectory( lib/locusta EXCLUDE_FROM_ALL )
 
 # Force generating protobuf headers first
 add_dependencies( r2e2 r2e2_messages )
@@ -60,6 +62,22 @@ add_dependencies( r2e2 r2e2_messages )
 set ( ALL_LIBS
     r2e2
     r2e2_messages
+    pbrt
+    pbrt_messages
+    atomic
+    ${CMAKE_THREAD_LIBS_INIT}
+    IlmImf
+    Imath
+    Half
+    glog
+    Ptex_static
+    ${LZ4_LIBRARY}
+    ${ZLIB_LIBRARY}
+    ${Protobuf_LIBRARIES}
+    ${OPENSSL_LIBRARIES}
+)
+
+set ( PBRT_LIBS
     pbrt
     pbrt_messages
     atomic
@@ -90,8 +108,8 @@ target_link_libraries( r2e2-lambda-master ${ALL_LIBS} ${STATIC_LINK_FLAGS} )
 add_executable ( r2e2-lambda-worker src/frontend/lambda-worker.cc )
 target_link_libraries( r2e2-lambda-worker ${ALL_LIBS} ${STATIC_LINK_FLAGS} )
 
-add_executable ( r2e2-locusta-worker src/frontend/locusta-worker.cc )
-target_link_libraries( r2e2-locusta-worker ${ALL_LIBS} ${STATIC_LINK_FLAGS} )
+add_executable ( r2e2-locusta-worker src/frontend/locusta-worker-refactored.cc )
+target_link_libraries( r2e2-locusta-worker ${PBRT_LIBS} commlib )
 
 add_executable( r2e2-local-render src/frontend/local-render.cc )
 target_link_libraries( r2e2-local-render ${ALL_LIBS} )
