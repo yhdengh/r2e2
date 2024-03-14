@@ -2,6 +2,7 @@
 
 #include "awsv4_sig.hh"
 
+#include <cstdint>
 #include <cstdio>
 #include <iostream>
 #include <openssl/hmac.h>

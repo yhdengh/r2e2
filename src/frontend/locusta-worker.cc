@@ -17,12 +17,9 @@
 #include <concurrentqueue/blockingconcurrentqueue.h>
 #include <concurrentqueue/concurrentqueue.h>
 
-#include "net/address.hh"
-#include "net/socket.hh"
-#include "util/eventfd.hh"
-#include "util/eventloop.hh"
 #include "util/exception.hh"
-#include "util/timerfd.hh"
+
+#include <commlib/commlib.hh>
 
 using namespace std;
 using namespace std::chrono;
@@ -32,21 +29,22 @@ class LocustaWorker
 private:
   struct Peer
   {
-    TCPSocket socket {};
+    locusta::StreamHandle stream;
     deque<pbrt::RayStatePtr> outgoing_rays {};
 
     string write_buffer {};
     string read_buffer {};
 
-    Peer( TCPSocket&& s )
-      : socket( move( s ) )
+    Peer( locusta::StreamHandle&& s )
+      : stream( move( s ) )
     {
     }
   };
 
+  std::unique_ptr<locusta::CommunicationLibrary> commlib_;
+
   // handling peers
-  EventLoop event_loop_ {};
-  TCPSocket listen_socket_ {};
+  locusta::EventLoop event_loop_ {};
   map<int, Peer> peers_ {}; // treelet_id -> peer
 
   // scene data
@@ -72,7 +70,7 @@ private:
 
   atomic<bool> terminated { false };
 
-  TimerFD status_timer_ { 1s, 1s };
+  locusta::TimerFD status_timer_ { 1s, 1s };
 
   void generate_rays();
 
@@ -84,65 +82,26 @@ public:
   LocustaWorker( const string& scene_path,
                  const uint32_t treelet_id,
                  const int spp,
-                 const Address& listen_addr,
-                 vector<Address>& peer_addrs )
-    : total_workers_( peer_addrs.size() )
+                 const int total_workers,
+                 std::unique_ptr<locusta::CommunicationLibrary>&& commlib )
+    : commlib_( move( commlib ) )
+    , total_workers_( total_workers )
     , my_treelet_id_( treelet_id )
     , scene_( scene_path, spp )
-    , treelet_( treelet_id < total_workers_ - 1 ? pbrt::LoadTreelet( scene_path, treelet_id ) : nullptr )
+    , treelet_( ( my_treelet_id_ < total_workers_ - 1 ) ? pbrt::LoadTreelet( scene_path, treelet_id ) : nullptr )
   {
     if ( total_workers_ != scene_.TreeletCount() + 1 ) {
       throw runtime_error( "treelet count mismatch" );
     }
 
-    cerr << "Loaded treelet " << treelet_id << "." << endl;
+    cerr << "Loaded treelet " << my_treelet_id_ << "." << endl;
 
-    listen_socket_.bind( listen_addr );
-    listen_socket_.set_blocking( false );
-    listen_socket_.set_reuseaddr();
-    listen_socket_.listen();
-
-    cerr << "Listening on " << listen_addr.to_string() << "." << endl;
-
-    {
-      EventLoop setup_loop {};
-
-      setup_loop.add_rule(
-        "Listen",
-        Direction::In,
-        listen_socket_,
-        [&] {
-          auto socket = listen_socket_.accept();
-
-          uint32_t peer_id;
-          socket.set_blocking( true );
-
-          if ( socket.read( string_view { reinterpret_cast<char*>( &peer_id ), sizeof( peer_id ) } ) != 4 ) {
-            throw runtime_error( "failed to read peer id" );
-          }
-
-          socket.set_blocking( false );
-
-          cerr << "Got a connection from " << socket.peer_address().to_string() << " (treelet " << peer_id << ")."
-               << endl;
-
-          peers_.emplace( peer_id, move( socket ) );
-        },
-        [] { return true; } );
-
-      this_thread::sleep_for( 5s ); // wait for other workers to start listening
-
-      // each worker connects to the workers after it
-      for ( int i = treelet_id + 1; i < static_cast<int>( peer_addrs.size() ); i++ ) {
-        TCPSocket socket;
-        socket.connect( peer_addrs[i] );
-        socket.write_all( { reinterpret_cast<const char*>( &treelet_id ), sizeof( treelet_id ) } );
-        cerr << "Connected to " << peer_addrs[i].to_string() << " (treelet " << i << ")." << endl;
-        peers_.emplace( i, move( socket ) );
-      }
-
-      while ( ( peers_.size() < total_workers_ - 1 ) and setup_loop.wait_next_event( -1 ) != EventLoop::Result::Exit ) {
-      }
+    // each worker connects to the workers after it
+    for ( int i = my_treelet_id_ + 1; i < static_cast<int>( total_workers_ ); i++ ) {
+      locusta::StreamHandle stream_handle = commlib_->stream_open( i, 0 );
+      commlib_->write( stream_handle, reinterpret_cast<const char*>( &treelet_id ), sizeof( treelet_id ) );
+      cerr << "Stream opened to node " << i << "." << endl;
+      peers_.emplace( i, move( stream_handle ) );
     }
 
     cerr << "Connections established to all peers." << endl;
@@ -155,9 +114,11 @@ public:
     // now setting up the main event loop
     event_loop_.set_fd_failure_callback( [] { cerr << "FD FAILURE CALLBACK" << endl; } );
 
+    /* STATUS */
     event_loop_.add_rule(
-      "Status", Direction::In, status_timer_, bind( &LocustaWorker::status, this ), [] { return true; } );
+      "Status", locusta::Direction::In, status_timer_, bind( &LocustaWorker::status, this ), [] { return true; } );
 
+    /* PROCESSED RAYS -> OUTGOING QUEUE */
     event_loop_.add_rule(
       "Output rays",
       [&] {
@@ -170,6 +131,7 @@ public:
       },
       [this] { return output_rays_size_ > 0; } );
 
+    /* PROCESSED SAMPLES -> OUTGOING QUEUE */
     event_loop_.add_rule(
       "Output samples",
       [&] {
@@ -185,20 +147,26 @@ public:
 
     for ( auto& [peer_id, peer] : peers_ ) {
       auto peer_it = peers_.find( peer_id );
-      peer.socket.set_blocking( false );
 
       // socket read and write events
       event_loop_.add_rule(
-        "SOCKET Peer " + to_string( peer_id ),
-        peer.socket,
-        [peer_it] { // IN callback
+        "SOCKET READ Peer " + to_string( peer_id ),
+        locusta::Direction::In,
+        peer.stream->first,
+        [this, peer_it] { // IN callback
           string buffer( 4096, '\0' );
-          auto data_len = peer_it->second.socket.read( { buffer } );
+          auto data_len = commlib_->read( peer_it->second.stream, buffer.data(), buffer.length() );
           peer_it->second.read_buffer.append( buffer, 0, data_len );
         },
-        [] { return true; },
-        [peer_it] { // OUT callback
-          auto data_len = peer_it->second.socket.write( string_view { peer_it->second.write_buffer } );
+        [] { return true; } );
+
+      event_loop_.add_rule(
+        "SOCKET WRITE Peer " + to_string( peer_id ),
+        locusta::Direction::Out,
+        peer.stream->second,
+        [this, peer_it] { // OUT callback
+          auto data_len = commlib_->write(
+            peer_it->second.stream, peer_it->second.write_buffer.data(), peer_it->second.write_buffer.length() );
           peer_it->second.write_buffer.erase( 0, data_len );
         },
         [peer_it] { return not peer_it->second.write_buffer.empty(); } );
@@ -256,7 +224,7 @@ public:
 
   void run()
   {
-    while ( not terminated and event_loop_.wait_next_event( -1 ) != EventLoop::Result::Exit ) {
+    while ( not terminated and event_loop_.wait_next_event( -1 ) != locusta::EventLoop::Result::Exit ) {
     }
   }
 
@@ -371,7 +339,7 @@ void LocustaWorker::status()
 
 void usage( const char* argv0 )
 {
-  cerr << argv0 << " SCENE-DATA TREELET SPP" << endl;
+  cerr << argv0 << " <LOCUSTA-NODE-ID> <LOCUSTA-FD> SCENE-DATA SPP" << endl;
 }
 
 int main( int argc, char const* argv[] )
@@ -381,7 +349,7 @@ int main( int argc, char const* argv[] )
       abort();
     }
 
-    if ( argc != 4 ) {
+    if ( argc != 5 ) {
       usage( argv[0] );
       return EXIT_FAILURE;
     }
@@ -389,18 +357,22 @@ int main( int argc, char const* argv[] )
     FLAGS_log_prefix = false;
     google::InitGoogleLogging( argv[0] );
 
+    const uint32_t node_id = static_cast<uint32_t>( stoi( argv[1] ) );
+    const int fd = stoi( argv[2] );
+
+    auto commlib = make_unique<locusta::CommunicationLibrary>( node_id, fd );
+
     pbrt::PbrtOptions.compressRays = false;
 
-    vector<Address> peer_addrs {
-      Address { "0.0.0.0", 45000 }, Address { "0.0.0.0", 45001 }, Address { "0.0.0.0", 45002 },
-      Address { "0.0.0.0", 45003 }, Address { "0.0.0.0", 45004 }, Address { "0.0.0.0", 45005 },
-    };
+    const string scene_path { argv[3] };
+    const uint32_t treelet_id { commlib->get_node_id() };
+    const int spp { stoi( argv[4] ) };
 
-    const string scene_path { argv[1] };
-    const uint32_t treelet_id { static_cast<uint32_t>( stoi( argv[2] ) ) };
-    const int spp { stoi( argv[3] ) };
+    LOG( INFO ) << "Serving treelet " << treelet_id << " of scene " << scene_path << " with " << spp << " spp." << endl;
 
-    LocustaWorker worker { scene_path, treelet_id, spp, peer_addrs[treelet_id], peer_addrs };
+    const size_t total_workers = 6;
+
+    LocustaWorker worker { scene_path, treelet_id, spp, total_workers, move( commlib ) };
     worker.run();
 
   } catch ( exception& ex ) {

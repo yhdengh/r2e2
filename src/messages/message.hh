@@ -38,22 +38,21 @@ public:
     COUNT
   };
 
-  static constexpr char const* OPCODE_NAMES[to_underlying( OpCode::COUNT )]
-    = { "",
-        "Hey",
-        "Ping",
-        "Pong",
-        "GetObjects",
-        "GenerateRays",
-        "RayBagEnqueued",
-        "RayBagDequeued",
-        "ProcessRayBag",
-        "WorkerStats",
-        "FinishUp",
-        "Bye",
-        "SetupAccumulator",
-        "ProcessSampleBag",
-        "SampleBagProcessed" };
+  static constexpr char const* OPCODE_NAMES[to_underlying( OpCode::COUNT )] = { "",
+                                                                                "Hey",
+                                                                                "Ping",
+                                                                                "Pong",
+                                                                                "GetObjects",
+                                                                                "GenerateRays",
+                                                                                "RayBagEnqueued",
+                                                                                "RayBagDequeued",
+                                                                                "ProcessRayBag",
+                                                                                "WorkerStats",
+                                                                                "FinishUp",
+                                                                                "Bye",
+                                                                                "SetupAccumulator",
+                                                                                "ProcessSampleBag",
+                                                                                "SampleBagProcessed" };
 
   constexpr static size_t HEADER_LENGTH = 13;
 
@@ -66,9 +65,7 @@ private:
 public:
   Message( const std::string_view& header, std::string&& payload );
 
-  Message( const uint64_t sender_id,
-           const OpCode opcode,
-           std::string&& payload );
+  Message( const uint64_t sender_id, const OpCode opcode, std::string&& payload );
 
   uint64_t sender_id() const { return sender_id_; }
   uint32_t payload_length() const { return payload_length_; }
@@ -128,6 +125,8 @@ private:
 
 public:
   using ::Client<SessionType, Message, Message>::Client;
+
+  ~Client() {}
 
   void push_request( Message&& msg ) override;
 };

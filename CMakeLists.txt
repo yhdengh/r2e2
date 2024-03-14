@@ -2,7 +2,24 @@ cmake_minimum_required ( VERSION 3.0.0 )
 cmake_policy ( SET CMP0054 NEW )
 project ( R2E2 )
 
+include ( ExternalProject )
+
 add_subdirectory ( lib/pbrt )
+
+ExternalProject_Add (
+  locusta
+  PREFIX locusta
+  SOURCE_DIR "/home/sadjad/projects/locusta"
+  INSTALL_COMMAND ""
+  BUILD_ALWAYS TRUE
+  BUILD_COMMAND cmake --build . --target locusta -j
+  CMAKE_ARGS -DCMAKE_C_COMPILER=${CMAKE_C_COMPILER} -DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER}
+)
+
+set ( LOCUSTA_LIBS
+  "${CMAKE_BINARY_DIR}/locusta/src/locusta-build/liblocusta.a"
+  "${CMAKE_BINARY_DIR}/locusta/src/locusta-build/lib/msquic/bin/Release/libmsquic.a"
+)
 
 include ( etc/build_defs.cmake )
 include ( etc/build_type.cmake )
@@ -22,6 +39,8 @@ include ( FindOpenSSL )
 include ( etc/find_lz4.cmake )
 
 include_directories ( SYSTEM
+  "/home/sadjad/projects/locusta/src"
+  "/home/sadjad/projects/locusta/lib/msquic/src/inc/"
   "${CMAKE_CURRENT_LIST_DIR}/lib/pbrt/src/include"
   "${CMAKE_CURRENT_LIST_DIR}/lib/pbrt/src/core"
   "${CMAKE_CURRENT_LIST_DIR}/lib/pbrt/src/ext/glog/src"
@@ -56,6 +75,7 @@ add_library( r2e2 STATIC
 
 # Force generating protobuf headers first
 add_dependencies( r2e2 r2e2_messages )
+add_dependencies( r2e2 locusta )
 
 set ( ALL_LIBS
     r2e2
@@ -79,7 +99,7 @@ set( STATIC_LINK_FLAGS "" )
 
 # In Release mode, always build the main binaries statically
 if ( CMAKE_BUILD_TYPE MATCHES Release )
-  set ( STATIC_LINK_FLAGS dl z unwind lzma -static -Wl,-allow-multiple-definition
+  set ( STATIC_LINK_FLAGS dl z lzma -static -Wl,-allow-multiple-definition
                           -Wl,--whole-archive -lpthread -Wl,--no-whole-archive
                           -s )
 endif()
@@ -91,7 +111,7 @@ add_executable ( r2e2-lambda-worker src/frontend/lambda-worker.cc )
 target_link_libraries( r2e2-lambda-worker ${ALL_LIBS} ${STATIC_LINK_FLAGS} )
 
 add_executable ( r2e2-locusta-worker src/frontend/locusta-worker.cc )
-target_link_libraries( r2e2-locusta-worker ${ALL_LIBS} ${STATIC_LINK_FLAGS} )
+target_link_libraries( r2e2-locusta-worker ${LOCUSTA_LIBS} ${ALL_LIBS} numa )
 
 add_executable( r2e2-local-render src/frontend/local-render.cc )
 target_link_libraries( r2e2-local-render ${ALL_LIBS} )

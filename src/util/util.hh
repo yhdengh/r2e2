@@ -5,6 +5,7 @@
 #include <sys/time.h>
 
 #include <chrono>
+#include <cstdint>
 #include <string>
 
 std::string safe_getenv( const std::string& key );

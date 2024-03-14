@@ -5,6 +5,7 @@
 #include <map>
 #include <string>
 #include <vector>
+#include <cstdint>
 
 class AWSv4Sig
 {
